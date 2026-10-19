@@ -13,8 +13,10 @@ import numpy as np
 import polars as pl
 
 from pyhealth.data import Patient
+
 from pyhealth.tasks.clinical_presence_mortality_mimic3 import (
     PAPER_LAB_GROUPS,
+    STRATEGIES,
     ClinicalPresenceMortalityMIMIC3,
     assign_splits,
     impute_cohort,
@@ -213,7 +215,7 @@ class TestImputeCohort(unittest.TestCase):
 
     def test_no_missing_left_and_measured_values_unchanged(self):
         observed = ~np.isnan(self.x)
-        for strategy in ["median", "mice", "group_mice"]:
+        for strategy in STRATEGIES: 
             with self.subTest(strategy=strategy):
                 out = impute_cohort(self.x, self.train, strategy, groups=self.groups)
                 self.assertEqual(out.shape, self.x.shape)

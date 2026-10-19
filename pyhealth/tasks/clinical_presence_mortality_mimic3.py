@@ -1,12 +1,17 @@
 """Clinical-presence mortality task for MIMIC-III."""
 
 import math 
+import warnings 
 from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, ClassVar, Dict, List, Optional
 
 import numpy as np
-from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+from sklearn.impute import IterativeImputer
+from sklearn.linear_model import LinearRegression 
 
 from .base_task import BaseTask
 
@@ -99,6 +104,9 @@ PAPER_LAB_GROUPS: dict[str, tuple[int, ...]] = {
 
 
 
+#: Imputation strategies understood by :func:`impute_cohort`.
+STRATEGIES = ("median", "mice", "group_mice", "missforest", "group_missforest")
+
 
 def impute_cohort(
     features: np.ndarray,
@@ -121,6 +129,10 @@ def impute_cohort(
       missing values by the prediction plus random noise.
     * ``"group_mice"``: MICE with the ``groups`` columns as extra predictors;
       they are removed from the output.
+    * ``"missforest"`` / ``"group_missforest"`` (our extension, not in the
+      paper): like (Group) MICE, but each lab is predicted by a forest of
+      decision trees instead of a straight line (scikit-learn's
+      MissForest-style ``IterativeImputer`` with ``ExtraTreesRegressor``).  
 
     With ``add_missing_indicators=True``, one 0/1 column per lab
     (1 = was missing) is appended. As in the authors' code, it is added
@@ -147,10 +159,14 @@ def impute_cohort(
                [3., 4.],
                [2., 6.]])
     """
-    if strategy not in ("median", "mice", "group_mice"):
+
+
+    if strategy not in STRATEGIES:
         raise ValueError(f"Unknown strategy: {strategy}")
-    if strategy == "group_mice" and groups is None:
-        raise ValueError("group_mice needs the groups array")
+    use_groups = strategy.startswith("group_")
+    if use_groups and groups is None:
+        raise ValueError(f"{strategy} needs the groups array") 
+    
 
     labs = np.asarray(features, dtype=float)
     missing = np.isnan(labs)
@@ -158,12 +174,32 @@ def impute_cohort(
 
     # Columns: labs, then (optional) missing indicators, then (optional) groups
     blocks = [labs]
+
     if add_missing_indicators:
         blocks.append(missing.astype(float))
-    if strategy == "group_mice":
+
+    if use_groups:
         blocks.append(np.asarray(groups, dtype=float).reshape(len(labs), -1))
     work = np.hstack(blocks)
-    n_keep = work.shape[1] - (blocks[-1].shape[1] if strategy == "group_mice" else 0)
+    n_keep = work.shape[1] - (blocks[-1].shape[1] if use_groups else 0)
+
+    if strategy.endswith("missforest"):
+        # Extension: tree-based chained imputation, fitted on training rows
+        forest = IterativeImputer(
+            estimator=ExtraTreesRegressor(
+                n_estimators=50, min_samples_leaf=3, random_state=seed
+            ),
+            initial_strategy="median",
+            max_iter=max_iter,
+            keep_empty_features=True,
+            random_state=seed,
+        )
+        with warnings.catch_warnings():  # fixed rounds, not a convergence error
+            warnings.simplefilter("ignore", category=ConvergenceWarning)
+            forest.fit(work[train_mask])
+            work = forest.transform(work)
+        return work[:, :n_keep]
+
 
     # Step 1: median of each column over TRAINING rows only
     # (a lab never measured in training gets 0)
