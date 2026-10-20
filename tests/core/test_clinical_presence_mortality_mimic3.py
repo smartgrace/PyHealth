@@ -23,7 +23,7 @@ from pyhealth.tasks.clinical_presence_mortality_mimic3 import (
 )
 
 FMT = "%Y-%m-%d %H:%M:%S"
-ADMIT = datetime(2150, 1, 1, 8, 0)
+ADMIT = datetime(2150, 1, 1, 8, 0)  # noqa: DTZ001 (MIMIC times are naive) 
 GLUCOSE, CREATININE, POTASSIUM = "50931", "50912", "50971"
 SMALL_PANEL = ["Glucose", "Creatinine", "Potassium"]
 

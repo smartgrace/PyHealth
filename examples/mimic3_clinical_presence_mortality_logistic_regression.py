@@ -35,29 +35,37 @@ Usage
 
 Results
     (1) synthetic default
-    Synthetic: 2000 patients, 3 MICE draws, 10 epochs, seed 0.
+    Synthetic data: 2000 patients, 3 MICE draws, 10 epochs, seed 0.
 
-    configuration                             skAUC           AUC    black Prio     black FNR   female Prio    female FNR   public Prio    public FNR
--------------------------------------------------------------------------------------------------------------------------------------------------
-A. Median                                 0.842         0.840         0.048         0.033         0.068         0.071         0.000        -0.028
-A. MICE                                   0.855         0.855         0.081         0.005         0.054         0.084         0.009        -0.049
-A. Group MICE                             0.855         0.856         0.080         0.005         0.060         0.084         0.016        -0.049
-A. Group MICE Missing                     0.855         0.857         0.033         0.003         0.061         0.084        -0.016        -0.054
-B. MissForest                             0.855         0.859         0.065         0.042         0.023         0.129         0.016        -0.051
-B. Group MissForest                       0.855         0.857         0.062         0.099         0.024         0.153         0.017        -0.073
-C. MICE, imputation fit on train only     0.854         0.855         0.079         0.058         0.047         0.148         0.018        -0.117
+ Configuration                        AUC       skAUC  Black Prio   Black FNR
+A. Median                          0.841       0.842       0.032       0.059
+A. MICE                            0.855       0.855       0.081       0.005
+A. Group MICE                      0.856       0.855       0.081       0.005
+A. Group MICE Missing              0.857       0.855       0.033       0.003
+B. MissForest                      0.859       0.855       0.064       0.043
+B. Group MissForest                0.856       0.855       0.063       0.084
+C. MICE, fit on train only         0.855       0.854       0.079       0.058
+
+Configuration                Female Prio  Female FNR Public Prio  Public FNR
+A. Median                          0.068       0.066      -0.016       0.017
+A. MICE                            0.061       0.084       0.008      -0.049
+A. Group MICE                      0.061       0.084       0.008      -0.049
+A. Group MICE Missing              0.061       0.084      -0.016      -0.054
+B. MissForest                      0.016       0.172       0.024      -0.097
+B. Group MissForest                0.024       0.175       0.016      -0.092
+C. MICE, fit on train only         0.047       0.148       0.018      -0.117
 
 AUC = PyHealth LogisticRegression; skAUC = scikit-learn cross-check.
-Gaps are group minus rest on the test set (bootstrap mean).
+Gaps = group minus rest on the test set, bootstrap mean (100x).
 
-
-    (2)then real MIMIC-III
+    (2) the real MIMIC-III
 
 """
 
 import argparse
 import gzip
 import tempfile
+import time 
 from pathlib import Path
 
 import numpy as np
@@ -226,16 +234,18 @@ def group_metrics(y, prob, flags, n_boot=100, seed=0):
 # 4. Experiment
 # ----------------------------------------------------------------------
 CONFIGS = {
-    "A. Median": dict(strategy="median"),
-    "A. MICE": dict(strategy="mice"),
-    "A. Group MICE": dict(strategy="group_mice"),
-    "A. Group MICE Missing": dict(strategy="group_mice",
-                                  add_missing_indicators=True),
-    "B. MissForest": dict(strategy="missforest"),
-    "B. Group MissForest": dict(strategy="group_missforest"),
-    "C. MICE, imputation fit on train only": dict(strategy="mice",
-                                                  fit_on="train"),
+    "A. Median": {"strategy": "median"},
+    "A. MICE": {"strategy": "mice"},
+    "A. Group MICE": {"strategy": "group_mice"},
+    "A. Group MICE Missing": {"strategy": "group_mice",
+                              "add_missing_indicators": True},
+    "B. MissForest": {"strategy": "missforest"},
+    "B. Group MissForest": {"strategy": "group_missforest"},
+    "C. MICE, imputation fit on train only": {"strategy": "mice",
+                                              "fit_on": "train"},
 }
+
+
 RANDOM_STRATEGIES = {"mice", "group_mice"}  # one draw is enough for the others
 
 
@@ -275,14 +285,21 @@ def run(root, lab_names, draws, epochs, seed):
 
 
 def print_table(rows):
-    keys = ["AUC"] + [f"{g} {m} gap" for g in GROUPS for m in ("Prio", "FNR")]
-    header = f"{'configuration':40}{'skAUC':>7}" + "".join(
-        f"{k.replace(' gap', ''):>14}" for k in keys)
-    print("\n" + header + "\n" + "-" * len(header))
-    for name, (ph, sk) in rows.items():
-        print(f"{name:40}{sk['AUC']:7.3f}" + "".join(f"{ph[k]:14.3f}" for k in keys))
+    """Print two narrow tables (they fit in the 88-character docstring limit)."""
+    parts = [
+        [("AUC", "AUC", 0), ("skAUC", "AUC", 1), ("Black Prio", "black Prio gap", 0),
+         ("Black FNR", "black FNR gap", 0)],
+        [("Female Prio", "female Prio gap", 0), ("Female FNR", "female FNR gap", 0),
+         ("Public Prio", "public Prio gap", 0), ("Public FNR", "public FNR gap", 0)],
+    ]
+    for columns in parts:
+        print("\n" + f"{'Configuration':28}" + "".join(f"{c:>12}" for c, _, _ in columns))
+        for name, results in rows.items():
+            name = name.replace("imputation fit", "fit")
+            values = "".join(f"{results[i][key]:12.3f}" for _, key, i in columns)
+            print(f"{name:28}{values}")
     print("\nAUC = PyHealth LogisticRegression; skAUC = scikit-learn cross-check.")
-    print("Gaps are group minus rest on the test set (bootstrap mean).")
+    print("Gaps = group minus rest on the test set, bootstrap mean (100x).")
 
 
 def main():

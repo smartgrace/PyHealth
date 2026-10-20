@@ -1,28 +1,38 @@
 """Clinical-presence mortality task for MIMIC-III."""
 
-import math 
-import warnings 
+import math
+import warnings
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar
 
 import numpy as np
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer
-from sklearn.linear_model import LinearRegression 
+from sklearn.linear_model import LinearRegression
 
 from .base_task import BaseTask
 
 
-def _to_number(value: Any) -> Optional[float]:
+def _to_number(value: Any) -> float | None:
     """Return ``value`` as a float, or None if it is blank or not a number."""
     try:
         number = float(value)
     except (TypeError, ValueError):
         return None
     return None if math.isnan(number) else number
+
+
+def _parse_time(value: str) -> datetime:
+    """Parse a MIMIC-III date-time string.
+
+    MIMIC-III times are date-shifted local times with no time zone, and
+    PyHealth's event timestamps are naive too, so the result stays naive.
+    """
+    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")  # noqa: DTZ007
+
 
 
 #: The 67 laboratory variables of the paper, as grouped by MIMIC-Extract
@@ -112,7 +122,7 @@ def impute_cohort(
     features: np.ndarray,
     train_mask: np.ndarray,
     strategy: str = "median",
-    groups: Optional[np.ndarray] = None,
+    groups: np.ndarray | None = None,
     add_missing_indicators: bool = False,
     max_iter: int = 10,
     seed: int = 0,
@@ -235,7 +245,7 @@ def impute_cohort(
 
 
 
-def assign_splits(patient_ids: List[str], seed: int = 0) -> Dict[str, str]:
+def assign_splits(patient_ids: list[str], seed: int = 0) -> dict[str, str]:
     """Split patients the way the authors' code does (commit fcb580b).
 
     * 20% of patients: ``"external_test"``.
@@ -282,18 +292,39 @@ def assign_splits(patient_ids: List[str], seed: int = 0) -> Dict[str, str]:
 class ClinicalPresenceMortalityMIMIC3(BaseTask):
     """One sample per patient (last admission): first-day labs, label, groups.
 
-    Cohort rules follow the authors' preprocessing.ipynb (Jeanselme et al., 2022).
+    Reproduces the MIMIC-III cohort of Jeanselme et al. (2022), following the
+    authors' ``preprocessing.ipynb``: each adult patient's last hospital
+    admission lasting at least 1 day, the most recent value of each lab
+    variable strictly inside the first 24 hours (``NaN`` if not measured),
+    and a label for death less than 8 days after admission. Patients with no
+    lab in the window are dropped, and a lab recorded twice at the same time
+    is dropped entirely. Missing labs are left as ``NaN`` so that
+    :func:`impute_cohort` can be fitted on training patients only.
+
+    Each sample has ``patient_id``, ``hadm_id``, ``features`` (one value per
+    name in ``lab_names``), ``mortality`` (0/1) and the 0/1 group flags
+    ``black``, ``female`` and ``public`` (any insurance other than Private).
+
+    Examples:
+        >>> from pyhealth.datasets import MIMIC3Dataset
+        >>> from pyhealth.tasks import ClinicalPresenceMortalityMIMIC3
+        >>> dataset = MIMIC3Dataset(  # doctest: +SKIP
+        ...     root="/path/to/mimiciii/1.4", tables=["labevents"]
+        ... )
+        >>> samples = dataset.set_task(  # doctest: +SKIP
+        ...     ClinicalPresenceMortalityMIMIC3()
+        ... )
     """
 
+
     task_name: str = "ClinicalPresenceMortalityMIMIC3"
-    input_schema: Dict[str, str] = {"features": "tensor"}
-    output_schema: Dict[str, str] = {"mortality": "binary"}
+    input_schema: ClassVar[dict[str, str]] = {"features": "tensor"}      
+    output_schema: ClassVar[dict[str, str]] = {"mortality": "binary"} 
 
     # Lab variable name -> the MIMIC-III itemids pooled into it.
     
-    TIME_FORMAT: ClassVar[str] = "%Y-%m-%d %H:%M:%S"
 
-    def __init__(self, lab_names: Optional[List[str]] = None) -> None:
+    def __init__(self, lab_names: list[str] | None = None) -> None:
         """Choose which lab variables become features.
 
         Args:
@@ -311,7 +342,7 @@ class ClinicalPresenceMortalityMIMIC3(BaseTask):
         self.lab_names = names
 
 
-    def __call__(self, patient: Any) -> List[Dict[str, Any]]:
+    def __call__(self, patient: Any) -> list[dict[str, Any]]:
         admissions = patient.get_events(event_type="admissions")
         if not admissions:
             return []
@@ -319,13 +350,13 @@ class ClinicalPresenceMortalityMIMIC3(BaseTask):
 
         # Rule: the stay must last at least 1 day (authors: LOS >= 1 day)
         admit = admission.timestamp
-        discharge = datetime.strptime(admission.dischtime, self.TIME_FORMAT)
+        discharge = _parse_time(admission.dischtime) 
         if discharge - admit < timedelta(days=1):
             return []
 
         # Rule: adults only (authors: AGE > 18, with AGE = days / 365)
         person = patient.get_events(event_type="patients")[0]
-        birth = datetime.strptime(person.dob, self.TIME_FORMAT)
+        birth = _parse_time(person.dob) 
         if (admit - birth).days / 365 <= 18:
             return []
 
@@ -381,89 +412,3 @@ class ClinicalPresenceMortalityMIMIC3(BaseTask):
             }
         ]
 
-
-
-"""Notes for discussion: 
-
-For the Cohort rules matching section, I found two things that need further discussion.
-In current PyHealth mimic3.yaml, pyhealth does not have Deathtime in admissions, and no hadm_id for labevents.
-
- 1.Label: died in hospital less than 8 days after admission
-        # (authors: DEATHTIME - ADMITTIME < 8 days; PyHealth does not load DEATHTIME, 
-        # so I used DISCHTIME of in-hospital deaths stands in for it)
-
- 2. authors Lab filters: labevent.hadm_id IN admission.hadm_id, but PyHealth does not load hadm_id for labevents
-
-We may have two options:
-
-Option A (keeping the workaround) offers a low-effort approach that relies on close approximations, 
-resulting in no external file changes and only requiring an explanation of two differences in the Pull Request (PR). 
-It uses discharge time as a proxy for death time—which is identical for 39 of 40 demo deaths—and matches 
-the authors' lab selection based on a time window alone. 
-
-In contrast, Option B (adding the 2 config lines) delivers a highly precise solution 
-that exactly matches the authors' labels by using DEATHTIME and exactly matches lab selections 
-by combining admission data with the time window. 
-
-However, Option B requires modifying mimic3.yaml (a file shared by all MIMIC-III users), 
-which introduces extra work including explaining the config change, 
-adding a column-loading test, and running the full test suite. 
-
-Despite these differences in accuracy and workload, both options remain classified as a Standalone Task contribution type.
-
-
-
-For imputation section - two bugs in the authors’ code
-
-Reading fcb580b closely, I found two things that look like mistakes:
-
-1. The sex flag is built from the wrong column. 
-The code has groups.GENDER = (outcomes.ETHNICITY == 'M'). 
-Ethnicity is never “M”, so the sex flag is always False. 
-In their Group MICE, sex therefore contributed nothing.
-
-2. Only one group column is removed after Group MICE. 
-imputed.iloc[:, :-1] drops the last column only. 
-The other two group columns (Black, plus the always-False sex flag) stay in the data the classifier sees. 
-That gives the Group MICE model a direct “is Black” input, which the other strategies don’t have. 
-It may help explain the paper’s large Black FNR gap under Group MICE.
-
-Our function does what the paper describes: correct flags, and all group columns removed. 
-For an exact numerical match we would copy the bugs instead.  
-But we could keep the correct version and report both bugs as reproducibility findings in the video and PR; 
-that’s strong material for the “what was difficult” part of the rubric. 
-And we could also run the buggy version as an ablation to see whether it explains the gap. 
-Also note that the authors never set a random seed for the MICE noise,
- so their exact numbers can’t be reproduced anyway; only the patterns can.
-
- 
-How the authoers really split patients
-The paper says “80% training, 10% hyperparameter tuning, 10% testing”. 
-Their code does something different (I traced experiment.ipynb, utils.py and analysis groups.ipynb at fcb580b):
-
-All patients (100%)
-├── 80% "training pool"  ← imputation learns from ALL of this
-│   ├── 10% of pool → internal test   (8% of all)
-│   └── rest → 90% train (64.8%) / 10% validation (7.2%)
-└── 20% → external test
-Reported results = internal test + external test (28% of all)
-
-The real split is about 65 / 7 / 28, not 80 / 10 / 10.
-The internal test patients helped fit the imputation, a small leak the paper doesn’t mention.
-
-
-Regarding the 67 variables. 
-I downloaded MIMIC-Extract’s public map file (itemid_to_variable_map.csv) 
-and applied the authors’ exact filter from preprocessing.ipynb: STATUS == 'ready', COUNT > 0, 
-a non-empty LEVEL2, and lab-table items, grouped by LEVEL1 name. 
-That gives 87 itemids in 67 variables. 
-The draft’s PAPER_LAB_GROUPS matches it exactly: the same 67 names and the same itemids in each.
-
-Some variables pool more than one itemid. 
-For example, Glucose = 50931 (chemistry lab) + 50809 (blood-gas lab). 
-That’s why we already changed LAB_ITEMS to “name → list of itemids”.
-
-The task now uses all 67 labs by default, 
-plus an optional lab_names= setting that picks a smaller panel.
-
-"""

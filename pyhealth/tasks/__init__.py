@@ -9,6 +9,13 @@ from .cardiology_detect import (
     cardiology_isCD_fn,
     cardiology_isWA_fn,
 )
+from .clinical_presence_mortality_mimic3 import (
+    PAPER_LAB_GROUPS as PAPER_LAB_GROUPS,
+    STRATEGIES as STRATEGIES,
+    ClinicalPresenceMortalityMIMIC3 as ClinicalPresenceMortalityMIMIC3,
+    assign_splits as assign_splits,
+    impute_cohort as impute_cohort,
+)
 from .chestxray14_binary_classification import ChestXray14BinaryClassification
 from .chestxray14_multilabel_classification import ChestXray14MultilabelClassification
 from .covid19_cxr_classification import COVID19CXRClassification
